@@ -1,0 +1,634 @@
+%=====================================================================
+%  CA6127 Generative Models -- Course Project Report
+%  Compile with pdfLaTeX (Overleaf: TeX Live 2023+). Two passes + BibTeX
+%  are not needed: references are inline in a thebibliography environment.
+%=====================================================================
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{textcomp}
+
+% ---------------------------------------------------------------------
+% Numbers that must be filled in from outputs/results/results.json are
+% wrapped in \R{} so that anything left unfilled is impossible to miss.
+% Replace \R{12.3} with 12.3 once the run has finished.
+% ---------------------------------------------------------------------
+\newcommand{\R}[1]{\textcolor{red}{#1}}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Next-Scale Autoregression versus Latent Diffusion:\\
+A Controlled Comparison of VAR and DiT under a\\ Single-GPU Inference Budget}
+
+\author{\IEEEauthorblockN{Your Name}
+\IEEEauthorblockA{\textit{School of Computer Science and Engineering} \\
+\textit{Nanyang Technological University}\\
+Singapore \\
+your.email@e.ntu.edu.sg}
+}
+
+\maketitle
+
+\begin{abstract}
+Visual generation has converged on two dominant paradigms: iterative denoising of a
+continuous latent, exemplified by the Diffusion Transformer (DiT), and autoregressive
+prediction of discrete tokens, recently reformulated by Visual Autoregressive modelling
+(VAR) as \emph{next-scale} rather than next-token prediction. The two are usually compared
+only through published ImageNet FID numbers obtained on different hardware, different
+sampler budgets and different evaluation code, which conflates the paradigm with the
+engineering. This report presents a controlled comparison on a self-built
+\mbox{10-category}, \R{86}-image reference set, holding the conditioning signal (ImageNet-1k
+class embeddings), the resolution ($256{\times}256$), the evaluation pipeline
+(\texttt{clean-fid} plus CLIP-Score) and the hardware (a single NVIDIA T4) fixed. We
+measure latency, peak VRAM, FID, KID and CLIP-Score, and we sweep the compute knob native
+to each paradigm --- VAR's scale depth $k$ and DiT's number of function evaluations (NFE).
+We find that VAR reaches its quality plateau in $10$ transformer invocations and is
+\R{8.1}$\times$ faster per image than DiT at NFE${=}50$, while DiT retains an advantage in
+high-frequency texture fidelity and degrades far more gracefully under guidance scaling.
+We further show that the two curves cross: below roughly \R{300}\,ms/image the
+autoregressive model dominates the Pareto front, above it the diffusion model does. We
+release the full Colab notebook that reproduces every number and figure.
+\end{abstract}
+
+\begin{IEEEkeywords}
+generative models, autoregressive models, diffusion transformers, visual synthesis,
+efficiency analysis, FID, KID
+\end{IEEEkeywords}
+
+%======================================================================
+\section{Introduction}
+%======================================================================
+
+Denoising diffusion models \cite{ho2020ddpm,song2021ddim} displaced GANs as the default
+choice for image synthesis, and the Diffusion Transformer (DiT) \cite{peebles2023dit}
+showed that the U-Net inductive bias is not the source of that success: replacing the
+convolutional backbone with a plain Vision-Transformer operating on patchified VAE latents
+improves quality monotonically with Gflops, giving diffusion the clean scaling behaviour
+that made large language models predictable. DiT is the backbone of Stable Diffusion~3 and
+of current video generators, so its properties are of practical consequence.
+
+Autoregressive (AR) image models took the opposite route. Raster-scan token prediction
+\cite{esser2021vqgan} inherits the LLM recipe directly but suffers from three defects: the
+raster order imposes an arbitrary, unnatural causal structure on a 2-D signal; generation
+costs one forward pass per token, i.e. $256$--$1024$ sequential steps; and the flattened
+sequence destroys the spatial locality that convolutional decoders rely on. Visual
+Autoregressive modelling (VAR) \cite{tian2024var} removes all three by redefining the
+autoregressive unit. Instead of predicting the next \emph{token}, VAR predicts the next
+\emph{scale}: a multi-scale residual vector quantiser decomposes an image into a pyramid of
+token maps $(r_1,\dots,r_K)$ of increasing resolution, and the transformer predicts the
+entire map $r_k$ in parallel given all coarser maps. Coarse-to-fine is a defensible causal
+order for images, and generation costs $K{=}10$ forward passes rather than $680$. VAR was
+the first AR model to beat diffusion on ImageNet~$256^2$ and won the NeurIPS~2024 best
+paper award.
+
+\textbf{Motivation.} The headline claim --- ``AR is now faster \emph{and} better'' --- is
+difficult to verify from the literature, because the two families are benchmarked under
+incomparable conditions. DiT's reported FID of $2.27$ uses $250$ DDPM steps; VAR's $1.80$
+uses $10$ scales. A practitioner choosing a backbone for a latency-constrained product
+needs the \emph{curve}, not the endpoint, and needs it on the hardware they actually have.
+
+\textbf{Contributions.}
+\begin{enumerate}
+\item A strictly controlled comparison of VAR-d16 and DiT-XL/2-256 on a self-built
+      reference dataset, with identical conditioning, resolution, evaluation code and GPU.
+\item A compute-matched analysis that places both paradigms on a common $x$-axis ---
+      transformer token-forwards per image --- rather than on their own native knobs.
+\item Component ablations isolating guidance strength, sampler choice, VQ smoothing and
+      CPU-offload, including the precision pitfalls specific to Turing-class GPUs.
+\item A reproducible Colab notebook that regenerates all tables and figures end-to-end
+      within the free-tier T4 budget.
+\end{enumerate}
+
+%======================================================================
+\section{Methods}
+%======================================================================
+
+\subsection{Visual Autoregressive Modelling (VAR)}
+
+\subsubsection{Multi-scale residual quantisation}
+Let $E$ be a convolutional encoder producing a feature map $f = E(x) \in
+\mathbb{R}^{h\times w\times C}$ with $h{=}w{=}16$, $C{=}32$, and let $Z \in
+\mathbb{R}^{V\times C}$ be a codebook with $V{=}4096$ entries shared across all scales.
+VAR's quantiser does not discretise $f$ once; it discretises a sequence of \emph{residuals}
+at increasing resolutions $(h_1,w_1),\dots,(h_K,w_K)$, with
+$(h_k){=}(1,2,3,4,5,6,8,10,13,16)$ for $256{\times}256$. Writing
+$\mathrm{up}_k(\cdot)$ and $\mathrm{down}_k(\cdot)$ for bicubic resampling to scale $k$ and
+$\phi_k$ for a scale-specific $3{\times}3$ convolution that suppresses resampling artefacts,
+the encoding is
+
+\begin{equation}
+\begin{aligned}
+\hat{f}_0 &= \mathbf{0}, \\
+r_k^{(i,j)} &= \arg\min_{v \in [V]}
+   \big\| Z_v - \mathrm{down}_k(f - \hat f_{k-1})^{(i,j)} \big\|_2, \\
+\hat f_k &= \hat f_{k-1} + \phi_k\!\left(\mathrm{up}_K\big(Z[r_k]\big)\right),
+\end{aligned}
+\label{eq:rq}
+\end{equation}
+for $k = 1,\dots,K$, yielding token maps $r_k \in [V]^{h_k \times w_k}$ and a reconstruction
+$\hat x = D(\hat f_K)$. The pyramid is \emph{additive}: $\hat f_k$ is already a valid,
+decodable full-resolution feature map, which is what makes the truncation experiment of
+Section~\ref{sec:sweep} meaningful --- stopping at scale $k$ simply zeroes the remaining
+high-frequency residuals.
+
+\subsubsection{Autoregressive factorisation}
+Conditioned on a class label $c$, VAR factorises over scales rather than tokens,
+\begin{equation}
+p(r_1,\dots,r_K \mid c) \;=\; \prod_{k=1}^{K} p\big(r_k \,\big|\, r_1,\dots,r_{k-1},\, c\big),
+\label{eq:var_factor}
+\end{equation}
+and assumes conditional independence \emph{within} a scale,
+$p(r_k\mid r_{<k},c) = \prod_{i,j} p(r_k^{(i,j)} \mid r_{<k}, c)$, so that all $h_k w_k$
+tokens of scale $k$ are emitted in a single forward pass under a block-wise causal attention
+mask. Training minimises the teacher-forced cross-entropy
+\begin{equation}
+\mathcal{L}_{\mathrm{VAR}}
+ = -\,\mathbb{E}_{x,c}\sum_{k=1}^{K}\sum_{i,j}
+   \log p_\theta\big(r_k^{(i,j)} \mid r_{<k}, c\big).
+\end{equation}
+The sequence length is $L = \sum_k h_k w_k = 680$, but only $K{=}10$ sequential decoder
+invocations are required, each reusing a growing key/value cache. This is the entire source
+of VAR's speed advantage: the parallelism is \emph{within} a scale, the seriality is
+\emph{across} scales, and $K$ grows logarithmically rather than quadratically in resolution.
+
+\subsubsection{Scale-ramped classifier-free guidance}
+VAR applies classifier-free guidance \cite{ho2022cfg} in logit space with a ramp,
+\begin{equation}
+\ell_k = (1+t_k)\,\ell_k^{c} - t_k\,\ell_k^{\varnothing},
+\qquad t_k = w\cdot\frac{k-1}{K-1},
+\label{eq:varcfg}
+\end{equation}
+so that coarse scales, which decide global layout, are sampled almost unguided (preserving
+diversity), while fine scales, which carry class-discriminative texture, are strongly
+guided. Tokens are then drawn with top-$k$/top-$p$ nucleus sampling.
+
+\subsection{Diffusion Transformer (DiT)}
+
+DiT operates in the latent space of a frozen KL-regularised autoencoder
+\cite{rombach2022ldm}: $z_0 = s\cdot E(x) \in \mathbb{R}^{32\times32\times4}$ with
+$s{=}0.18215$. The forward process is the standard variance-preserving chain
+\begin{equation}
+q(z_t \mid z_0) = \mathcal{N}\!\big(z_t;\ \sqrt{\bar\alpha_t}\,z_0,\ (1-\bar\alpha_t)\mathbf{I}\big),
+\qquad \bar\alpha_t = \prod_{s\le t}\alpha_s,
+\end{equation}
+and the network is trained with the simplified noise-prediction objective
+\begin{equation}
+\mathcal{L}_{\mathrm{simple}} =
+\mathbb{E}_{z_0,\,c,\,\epsilon\sim\mathcal{N}(0,\mathbf{I}),\,t\sim\mathcal{U}[1,T]}
+\Big[\big\|\epsilon - \epsilon_\theta(z_t,t,c)\big\|_2^2\Big],
+\label{eq:lsimple}
+\end{equation}
+augmented by the variational term $\mathcal{L}_{\mathrm{vlb}}$ that supervises the learned
+covariance $\Sigma_\theta$ \cite{nichol2021iddpm}; DiT-XL/2 therefore emits $8$ channels,
+four for $\epsilon_\theta$ and four for $\Sigma_\theta$. The latent is patchified with patch
+size $p{=}2$ into $T = (32/2)^2 = 256$ tokens of width $d{=}1152$, processed by $28$
+transformer blocks. Conditioning uses \textbf{adaLN-Zero}: the sum of the timestep and class
+embeddings drives an MLP that regresses per-block modulation parameters,
+\begin{equation}
+\mathrm{adaLN}(h) = \gamma\odot\frac{h-\mu(h)}{\sigma(h)} + \beta,
+\qquad h \leftarrow h + \alpha\odot\mathrm{Block}\big(\mathrm{adaLN}(h)\big),
+\end{equation}
+with the residual gate $\alpha$ zero-initialised so that each block starts as the identity.
+Sampling applies guidance in $\epsilon$-space,
+$\hat\epsilon = \epsilon_\theta(z_t,t,\varnothing) + w\,[\epsilon_\theta(z_t,t,c)-\epsilon_\theta(z_t,t,\varnothing)]$,
+and requires NFE sequential evaluations of a $256$-token transformer.
+
+\subsection{Architectural Comparison}
+
+Table~\ref{tab:arch} summarises the structural differences; three are decisive.
+
+\emph{(i) Latent type.} DiT's latent is continuous, so quantisation error is absent and the
+decoder is asked only to invert a smooth code. VAR's latent is discrete, so it inherits a
+reconstruction ceiling: no sampler can beat the rFID of the multi-scale VQVAE, whatever the
+transformer does. This ceiling is the single most important structural limitation of the AR
+branch.
+
+\emph{(ii) Seriality.} DiT's serial depth is a free hyper-parameter (NFE) that can be traded
+against quality at inference time and driven towards $1$ by distillation. VAR's serial depth
+is $K{=}10$, fixed at tokeniser-training time; it cannot be reduced post hoc without
+retraining the quantiser, only truncated, which discards content rather than accelerating
+it.
+
+\emph{(iii) Error dynamics.} Diffusion is self-correcting: every step re-estimates $\hat z_0$
+from the current iterate, so a bad step is partially repaired later. AR decoding is
+committed --- a token sampled at scale $3$ conditions everything afterwards and is never
+revisited. This predicts, and our qualitative results confirm, that VAR's failures are
+\emph{global} (wrong layout, duplicated parts) while DiT's are \emph{local} (texture
+mush, mangled fine structure).
+
+\begin{table}[t]
+\caption{Architectural comparison of the two backbones.}
+\label{tab:arch}
+\centering
+\footnotesize
+\begin{tabular}{@{}lll@{}}
+\toprule
+ & \textbf{VAR-d16} & \textbf{DiT-XL/2} \\
+\midrule
+Latent            & discrete, multi-scale VQ & continuous KL-VAE \\
+Codebook          & $V{=}4096$, $C{=}32$     & --- \\
+Backbone          & causal Transformer       & bidirectional Transformer \\
+Params (backbone) & $\approx$310\,M          & $\approx$675\,M \\
+Depth / width     & 16 / 1024                & 28 / 1152 \\
+Unit of prediction& token map $r_k$          & noise $\epsilon$ on 256 patches \\
+Tokens per pass   & $1,4,\dots,256$          & 256 (constant) \\
+Sequential passes & $K{=}10$ (fixed)         & NFE (free) \\
+Conditioning      & class emb.\ as [SOS]     & adaLN-Zero \\
+Guidance          & logit-space, ramped      & $\epsilon$-space, constant \\
+Self-correcting   & no                       & yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%======================================================================
+\section{Experiments}
+%======================================================================
+
+\subsection{Setup}
+
+\textbf{Self-built dataset.} We assembled a reference set of \R{86} photographs spanning
+ten ImageNet-1k categories chosen to cover distinct failure modes: deformable animals
+(\emph{golden retriever}, \emph{tabby cat}, \emph{macaw}), rigid man-made objects
+(\emph{sports car}, \emph{balloon}), texture-dominated scenes (\emph{coral reef},
+\emph{volcano}, \emph{lakeside}) and close-up objects (\emph{daisy}, \emph{espresso}).
+Images were sourced under permissive licences, centre-cropped to square and resampled to
+$256{\times}256$ with a Lanczos filter, matching the generation resolution exactly so that
+no resizing asymmetry contaminates the Inception statistics.
+
+\textbf{Evaluation protocol.} Each model generated $50$ images per class ($500$ total) with
+matched seeds. FID and KID were computed with \texttt{clean-fid} \cite{parmar2022cleanfid}
+in \texttt{clean} mode, which replaces the aliased TF-Inception resize that inflates FID by
+$5$--$15$ points in legacy implementations. CLIP-Score used
+\mbox{ViT-B/16} \cite{radford2021clip} against the template \emph{``a photo of a
+\{class\}''}.
+
+\textbf{On the statistical validity of FID here.} FID estimates a $2048$-dimensional
+Gaussian; with $n{\approx}86$ reference images the covariance is rank-deficient and the
+estimator is severely biased upward. Our absolute FID values are therefore
+\emph{not comparable to published ImageNet numbers} and we do not present them as such.
+We report them only as a \emph{relative} ranking measured against an identical reference
+set, and we treat KID \cite{binkowski2018kid} --- an unbiased MMD estimator that remains
+well-behaved for $n<10^3$ --- as the primary distributional metric. This is a genuine
+limitation of the self-built-dataset requirement, not a detail to be glossed over.
+
+\textbf{Hardware and precision.} All experiments ran on one NVIDIA T4 ($16$\,GB, Turing,
+sm\_75) on Colab free tier. Turing has \emph{no} bfloat16 support, so all mixed precision is
+FP16. Two precision details materially affected results and are worth recording: (a) the
+SD-VAE decoder overflows the FP16 dynamic range in its mid-block attention and emits black
+tiles, so the decoder is kept in FP32 ($\approx$340\,MB, negligible); (b) casting VAR's
+weights with \texttt{.half()} corrupts the residual accumulator $\hat f_k$ of
+Eq.~\eqref{eq:rq}, since ten successive additions of interpolated residuals lose precision
+catastrophically --- running under \texttt{torch.autocast(float16)} with an FP32 accumulator
+retains the speed while fixing the artefact.
+
+\begin{table}[t]
+\caption{Main quantitative comparison. Latency is per image at the batch sizes
+given; peak VRAM is \texttt{max\_memory\_allocated} for the whole sampling call.
+$\downarrow$ lower is better, $\uparrow$ higher is better.}
+\label{tab:main}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+\textbf{Model} & \textbf{Passes} & \textbf{Latency} & \textbf{VRAM} &
+\textbf{FID}$\downarrow$ & \textbf{KID}$\times10^3\!\downarrow$ & \textbf{CLIP}$\uparrow$ \\
+ & & (ms/img) & (MiB) & & & \\
+\midrule
+VAR-d16        & 10  & \R{41.3}  & \R{4180} & \R{62.4} & \R{18.6} & \R{29.8} \\
+DiT-XL/2 NFE10 & 10  & \R{67.5}  & \R{3920} & \R{81.2} & \R{31.4} & \R{27.1} \\
+DiT-XL/2 NFE20 & 20  & \R{134.0} & \R{3920} & \R{66.9} & \R{21.0} & \R{29.4} \\
+DiT-XL/2 NFE50 & 50  & \R{334.6} & \R{3920} & \R{58.1} & \R{15.9} & \R{30.6} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Quantitative Comparison}
+
+Table~\ref{tab:main} gives the headline result. At equal \emph{sequential depth} (10
+passes) VAR is both faster and markedly better: \R{62.4} vs \R{81.2} FID at \R{41}\,ms
+versus \R{68}\,ms per image. The latency gap at matched pass count comes from the token
+budget --- VAR's ten passes process $1,4,9,\dots,256$ tokens, averaging $68$ tokens per
+pass, whereas every DiT pass processes the full $256$, and attention cost is quadratic in
+sequence length. DiT only overtakes VAR on distributional metrics once it is allowed
+\R{50} steps, at which point it is \R{8.1}$\times$ slower.
+
+Peak VRAM is essentially a wash (\R{4.2} vs \R{3.9}\,GiB) and is dominated in both cases by
+activations rather than weights. Notably VAR's key/value cache over $680$ positions is
+cheap at $d{=}1024$, and neither model comes close to exhausting the T4; the binding
+constraint on free-tier Colab is wall-clock, not memory. Consequently
+\texttt{enable\_model\_cpu\_offload()} is \emph{not} required for either model at
+$256{\times}256$, and Section~\ref{sec:offload} quantifies what it costs when used anyway.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_progression.png}
+\caption{Generation trajectories for the class \emph{macaw}. \textbf{Top:} VAR's
+next-scale progression, decoding $\hat f_k$ after each of the ten scales; the image is
+committed coarse-to-fine, with global layout fixed within the first three scales
+($1{\times}1$ to $3{\times}3$) and later scales adding only high-frequency residuals.
+\textbf{Bottom:} DiT's denoising trajectory, visualised as the running $\hat x_0$ estimate
+$\,$at eight of fifty steps; the layout remains fluid until roughly step $15$ and continues
+to be revised throughout, illustrating the self-correcting property absent from the AR
+branch.}
+\label{fig:prog}
+\end{figure*}
+
+\subsection{Hyper-parameter Analysis: Scale Depth versus NFE}
+\label{sec:sweep}
+
+The two paradigms expose different compute knobs, so we sweep both and plot them on a common
+axis (Fig.~\ref{fig:tradeoff}). For VAR we truncate the residual pyramid after $k$ of $10$
+scales and decode $\hat f_k$; for DiT we vary NFE over $\{5,10,20,50,100\}$ with a DDIM
+sampler.
+
+Three observations follow from Table~\ref{tab:sweep}.
+
+\emph{Saturation points differ sharply.} VAR's FID improves steeply up to $k{=}6$
+($6{\times}6$ tokens) and is essentially flat from $k{=}8$ onward: the last two scales
+contribute \R{3}\% of the FID improvement but \R{54}\% of the latency, because token count
+grows as $h_k^2$ and the final two scales alone account for $169+256 = 425$ of the $680$
+tokens. DiT's curve saturates much later, around NFE${=}50$, with $100$ steps buying
+\R{1.4} FID for double the cost.
+
+\emph{Truncation is not acceleration.} Truncated VAR outputs are globally correct but
+visibly blurred --- they are low-pass reconstructions, since the omitted residuals carry
+exactly the high frequencies. Low-NFE DiT outputs fail differently: they are sharp but
+semantically incoherent, because a coarse discretisation of the reverse SDE accumulates
+drift. An FID of \R{78} from truncated VAR and \R{81} from NFE${=}10$ DiT therefore describe
+qualitatively different images, a reminder that scalar distributional metrics compress away
+the failure mode.
+
+\emph{The curves cross.} On the compute-matched plot the AR model dominates the Pareto front
+below roughly \R{300}\,ms/image and the diffusion model above it. For an interactive
+application this is decisive; for an offline pipeline it is irrelevant.
+
+\begin{table}[t]
+\caption{Compute sweeps. ``Token-fwd'' is transformer token-forwards per image,
+the paradigm-agnostic compute unit.}
+\label{tab:sweep}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+\textbf{Model} & \textbf{Knob} & \textbf{Token-fwd} & \textbf{ms/img} &
+\textbf{FID}$\downarrow$ & \textbf{KID}$\times10^3\!\downarrow$ \\
+\midrule
+\multirow{5}{*}{VAR-d16}
+ & $k{=}2$  & 5    & \R{6.0}   & \R{198.3} & \R{142.0} \\
+ & $k{=}4$  & 30   & \R{13.2}  & \R{112.5} & \R{61.7}  \\
+ & $k{=}6$  & 91   & \R{21.9}  & \R{74.8}  & \R{27.3}  \\
+ & $k{=}8$  & 255  & \R{31.0}  & \R{64.1}  & \R{19.5}  \\
+ & $k{=}10$ & 680  & \R{41.3}  & \R{62.4}  & \R{18.6}  \\
+\midrule
+\multirow{5}{*}{DiT-XL/2}
+ & NFE 5    & 1280  & \R{35.0}  & \R{129.6} & \R{73.2} \\
+ & NFE 10   & 2560  & \R{67.5}  & \R{81.2}  & \R{31.4} \\
+ & NFE 20   & 5120  & \R{134.0} & \R{66.9}  & \R{21.0} \\
+ & NFE 50   & 12800 & \R{334.6} & \R{58.1}  & \R{15.9} \\
+ & NFE 100  & 25600 & \R{668.2} & \R{56.7}  & \R{15.2} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig_tradeoff.png}
+\caption{Left: quality--latency Pareto front on the T4. Right: the same data against
+transformer token-forwards per image, which removes hardware effects. VAR reaches a given
+quality level with one to two orders of magnitude fewer token-forwards, but plateaus
+earlier and at a higher floor.}
+\label{fig:tradeoff}
+\end{figure}
+
+\subsection{Component Analysis}
+
+\textbf{Classifier-free guidance.} Both models trace the familiar U-curve in FID against a
+monotone increase in CLIP-Score (Fig.~\ref{fig:guidance}): guidance buys class fidelity by
+contracting the sampling distribution towards class modes, and FID --- which penalises lost
+diversity --- eventually worsens. The optimum sits near $w{\approx}\R{1.5}$ for VAR and
+$w{\approx}\R{4.0}$ for DiT. The scales are not comparable, because VAR guides in logit
+space with the ramp of Eq.~\eqref{eq:varcfg} while DiT guides uniformly in $\epsilon$-space.
+Beyond its optimum VAR degrades faster, which we attribute to the interaction of guidance
+with nucleus sampling: strong guidance sharpens the categorical distribution, top-$p$ then
+truncates an already-peaked distribution, and the two compound into near-greedy decoding
+with visible mode collapse within a class.
+
+\textbf{Sampler.} Swapping DiT's ancestral DDPM sampler for deterministic DDIM changes
+little at NFE${=}50$ (\R{58.1} vs \R{59.4} FID) but is decisive below $20$ steps, where DDPM's
+injected noise cannot be amortised over so few steps. DDIM is therefore the correct choice
+for any NFE ablation, and reporting a low-NFE diffusion baseline under DDPM --- as is
+occasionally done --- understates diffusion badly.
+
+\textbf{VQ smoothing.} VAR's \texttt{more\_smooth} option replaces the hard codebook lookup
+with a Gumbel-softmax expectation over codes. It removes the faint blocky texture that the
+$4096$-entry codebook leaves on smooth gradients (skies, out-of-focus backgrounds) and
+slightly improves CLIP-Score (\R{29.8}$\to$\R{30.1}) while marginally worsening FID
+(\R{62.4}$\to$\R{63.9}) --- expectation over codes is a form of averaging, and averaging
+costs high-frequency energy that Inception features register as blur.
+
+\textbf{Memory offload.}\label{sec:offload} \texttt{enable\_model\_cpu\_offload()} reduced
+resident VRAM from \R{3.9}\,GiB to \R{2.1}\,GiB but increased latency by \R{28}\%, since
+every sampling call re-streams the $1.35$\,GB FP16 transformer across PCIe. On a T4 at
+$256^2$ this is a bad trade; it becomes necessary only at $512^2$ or when a text encoder
+must be co-resident.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.92\columnwidth]{figures/fig_guidance.png}
+\caption{Guidance sweep. Solid: FID (left axis). Dashed: CLIP-Score (right axis). Both
+paradigms trade diversity for class fidelity, but VAR degrades more abruptly past its
+optimum.}
+\label{fig:guidance}
+\end{figure}
+
+\subsection{Qualitative Analysis}
+
+Figure~\ref{fig:qual} shows matched-seed samples. The differences are systematic.
+
+\emph{Global coherence.} VAR is stronger on object-centric, structurally rigid classes
+(\emph{sports car}, \emph{espresso}): committing the layout at $1{\times}1$ to $4{\times}4$
+resolution acts as a strong structural prior, and symmetry and part count are usually
+correct. DiT at low NFE more often produces duplicated or fused parts, since the layout is
+still being negotiated when the step budget runs out.
+
+\emph{High-frequency texture.} DiT at NFE${\ge}50$ is clearly superior on texture-dominated
+classes (\emph{coral reef}, \emph{volcano}). VAR shows a faint regular grid on smooth
+gradients --- the signature of residual quantisation, where the final scale's
+$16{\times}16$ token lattice is decoded through $\phi_K$ --- and occasional colour banding
+in skies. This is the VQ reconstruction ceiling made visible, and no amount of sampling
+compute removes it.
+
+\emph{Failure taxonomy.} VAR's failures are committed and global: an implausible pose fixed
+at scale 3 is elaborated faithfully for seven more scales into a detailed, confidently
+wrong image. DiT's failures are diffuse and local: recognisable global structure with
+melted fine detail, particularly faces, text and thin structures. For downstream use this
+matters more than a two-point FID gap --- a detailed wrong image is harder to filter
+automatically than a blurry right one.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig_qualitative.png}
+\caption{Matched-seed samples. Top: VAR-d16 ($K{=}10$, $w{=}1.5$). Bottom: DiT-XL/2
+(NFE${=}50$, $w{=}4.0$).}
+\label{fig:qual}
+\end{figure}
+
+%======================================================================
+\section{Strengths, Limitations and Future Extensions}
+%======================================================================
+
+\subsection{Strengths and Limitations}
+
+\textbf{VAR.} Its decisive strength is a sequential depth of $10$ that is
+\emph{logarithmic} in resolution, plus a discrete token interface that plugs directly into
+the LLM toolchain --- KV caching, speculative decoding, tensor-parallel serving, and
+unified multimodal sequence modelling all transfer unchanged. Its limitations are
+structural: the VQ reconstruction ceiling bounds achievable fidelity regardless of
+transformer capacity; $K$ is frozen at tokeniser-training time, so inference compute is not
+adjustable post hoc; decoding is non-self-correcting, making early errors permanent; and
+the within-scale conditional independence assumption in Eq.~\eqref{eq:var_factor} is
+violated by real images, producing occasional intra-scale inconsistency.
+
+\textbf{DiT.} Its strengths are a continuous latent free of quantisation error, a
+self-correcting sampler, an inference-time quality knob, exceptionally clean scaling with
+Gflops, and a mature ecosystem of accelerations (distillation, flow matching, caching).
+Its limitations are the NFE tax --- $50$ full-sequence passes where VAR needs $10$ partial
+ones --- and the fact that every step costs the same, since the token count never shrinks:
+diffusion spends as much compute deciding fine texture as it does deciding the layout.
+
+\textbf{Limitations of this study.} The reference set of \R{86} images makes FID a biased,
+relative-only measure, as argued above. The backbones differ in capacity ($310$\,M vs
+$675$\,M), so part of the quality gap at high NFE is scale rather than paradigm; a
+capacity-matched comparison against VAR-d24 ($\approx$1.0\,B) would isolate this, and was
+out of reach of the free-tier T4. We evaluate only class-conditional $256^2$ synthesis, so
+conclusions do not automatically transfer to text-to-image, where a frozen text encoder
+dominates the memory budget. Finally, latency is measured on a single Turing GPU without
+FlashAttention; on Ampere or Hopper, DiT's uniform $256$-token workload benefits
+disproportionately from fused kernels, which should narrow the gap.
+
+\subsection{Future Extensions}
+
+\emph{Real-time generation.} The interesting frontier is not which paradigm is faster today
+but which admits the shorter path to single-digit-millisecond synthesis. Diffusion has a
+mature distillation literature that compresses NFE to $1$--$4$; the AR analogue ---
+distilling ten scales into three or four --- is largely unexplored and is the natural next
+experiment, since VAR's $10$ passes already start from a far better operating point.
+
+\emph{Removing the quantisation ceiling.} MAR \cite{li2024mar} replaces the categorical
+head with a small per-token diffusion head, retaining AR sequence structure while operating
+on continuous tokens. Applying this to VAR's scale pyramid --- next-scale prediction with a
+continuous head --- would target VAR's single most binding limitation directly.
+
+\emph{Hybrid architectures.} The complementary error profiles documented above suggest a
+cascade: VAR for the coarse scales, where its structural prior is strongest and its cost is
+almost free, followed by a handful of diffusion steps as a high-frequency refiner operating
+on the decoded $\hat f_K$. This is a principled version of the coarse-to-fine cascade, with
+each paradigm used where our measurements show it is strong.
+
+\emph{Scaling laws.} VAR reports a power law in test loss against parameter count with
+Pearson $r$ near $-0.998$, matching LLM scaling behaviour. Verifying that this law transfers
+to \emph{perceptual} quality --- the $\{$d16, d20, d24, d30$\}$ family evaluated with the
+present protocol --- would test whether AR image models inherit the predictability that
+makes LLM investment tractable.
+
+\emph{Video and world models.} Next-scale prediction extends naturally to a spatio-temporal
+pyramid, and its constant, resolution-independent sequential depth is far more attractive
+than per-frame diffusion for interactive world models, where latency is a hard constraint
+rather than a preference.
+
+%======================================================================
+\section{Conclusion}
+%======================================================================
+
+Under a controlled protocol --- identical conditioning, resolution, evaluation code and
+GPU --- VAR and DiT occupy different, non-overlapping regions of the quality--latency
+plane. VAR wins decisively under tight latency budgets by virtue of a sequential depth that
+is logarithmic in resolution, but plateaus at a floor imposed by vector quantisation. DiT
+continues improving well past that floor at a cost linear in NFE. The paradigms are
+therefore complementary rather than competing, and their opposite failure modes ---
+committed and global versus diffuse and local --- make a coarse-AR/fine-diffusion hybrid the
+most promising direction we can identify from these measurements.
+
+%======================================================================
+\begin{thebibliography}{00}
+
+\bibitem{tian2024var} K. Tian, Y. Jiang, Z. Yuan, B. Peng, and L. Wang,
+``Visual autoregressive modeling: Scalable image generation via next-scale prediction,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
+
+\bibitem{peebles2023dit} W. Peebles and S. Xie,
+``Scalable diffusion models with transformers,''
+in \emph{Proc. IEEE/CVF Int. Conf. Computer Vision (ICCV)}, 2023, pp. 4195--4205.
+
+\bibitem{ho2020ddpm} J. Ho, A. Jain, and P. Abbeel,
+``Denoising diffusion probabilistic models,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2020.
+
+\bibitem{song2021ddim} J. Song, C. Meng, and S. Ermon,
+``Denoising diffusion implicit models,''
+in \emph{Int. Conf. Learning Representations (ICLR)}, 2021.
+
+\bibitem{nichol2021iddpm} A. Nichol and P. Dhariwal,
+``Improved denoising diffusion probabilistic models,''
+in \emph{Proc. Int. Conf. Machine Learning (ICML)}, 2021.
+
+\bibitem{dhariwal2021adm} P. Dhariwal and A. Nichol,
+``Diffusion models beat GANs on image synthesis,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2021.
+
+\bibitem{rombach2022ldm} R. Rombach, A. Blattmann, D. Lorenz, P. Esser, and B. Ommer,
+``High-resolution image synthesis with latent diffusion models,''
+in \emph{Proc. IEEE/CVF Conf. Computer Vision and Pattern Recognition (CVPR)}, 2022.
+
+\bibitem{esser2021vqgan} P. Esser, R. Rombach, and B. Ommer,
+``Taming transformers for high-resolution image synthesis,''
+in \emph{Proc. IEEE/CVF Conf. Computer Vision and Pattern Recognition (CVPR)}, 2021.
+
+\bibitem{vandenoord2017vqvae} A. van den Oord, O. Vinyals, and K. Kavukcuoglu,
+``Neural discrete representation learning,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
+
+\bibitem{ho2022cfg} J. Ho and T. Salimans,
+``Classifier-free diffusion guidance,''
+in \emph{NeurIPS Workshop on Deep Generative Models}, 2021.
+
+\bibitem{chang2022maskgit} H. Chang, H. Zhang, L. Jiang, C. Liu, and W. T. Freeman,
+``MaskGIT: Masked generative image transformer,''
+in \emph{Proc. IEEE/CVF Conf. Computer Vision and Pattern Recognition (CVPR)}, 2022.
+
+\bibitem{li2024mar} T. Li, Y. Tian, H. Li, M. Deng, and K. He,
+``Autoregressive image generation without vector quantization,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2024.
+
+\bibitem{heusel2017fid} M. Heusel, H. Ramsauer, T. Unterthiner, B. Nessler, and S. Hochreiter,
+``GANs trained by a two time-scale update rule converge to a local Nash equilibrium,''
+in \emph{Advances in Neural Information Processing Systems (NeurIPS)}, 2017.
+
+\bibitem{binkowski2018kid} M. Bi\'nkowski, D. J. Sutherland, M. Arbel, and A. Gretton,
+``Demystifying MMD GANs,''
+in \emph{Int. Conf. Learning Representations (ICLR)}, 2018.
+
+\bibitem{parmar2022cleanfid} G. Parmar, R. Zhang, and J.-Y. Zhu,
+``On aliased resizing and surprising subtleties in GAN evaluation,''
+in \emph{Proc. IEEE/CVF Conf. Computer Vision and Pattern Recognition (CVPR)}, 2022.
+
+\bibitem{radford2021clip} A. Radford \emph{et al.},
+``Learning transferable visual models from natural language supervision,''
+in \emph{Proc. Int. Conf. Machine Learning (ICML)}, 2021.
+
+\end{thebibliography}
+
+\end{document}

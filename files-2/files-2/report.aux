@@ -1,0 +1,71 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{ho2020ddpm,song2021ddim}
+\citation{peebles2023dit}
+\citation{esser2021vqgan}
+\citation{tian2024var}
+\@writefile{toc}{\contentsline {section}{\numberline {I}Introduction}{1}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {II}Methods}{1}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-A}}Visual Autoregressive Modelling (VAR)}{1}{subsection.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {II-A}1}Multi-scale residual quantisation}{1}{subsubsection.2.1.1}\protected@file@percent }
+\citation{ho2022cfg}
+\citation{rombach2022ldm}
+\citation{nichol2021iddpm}
+\citation{parmar2022cleanfid}
+\citation{radford2021clip}
+\newlabel{eq:rq}{{1}{2}{Multi-scale residual quantisation}{equation.1}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {II-A}2}Autoregressive factorisation}{2}{subsubsection.2.1.2}\protected@file@percent }
+\newlabel{eq:var_factor}{{2}{2}{Autoregressive factorisation}{equation.2}{}}
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {\mbox  {II-A}3}Scale-ramped classifier-free guidance}{2}{subsubsection.2.1.3}\protected@file@percent }
+\newlabel{eq:varcfg}{{4}{2}{Scale-ramped classifier-free guidance}{equation.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-B}}Diffusion Transformer (DiT)}{2}{subsection.2.2}\protected@file@percent }
+\newlabel{eq:lsimple}{{6}{2}{Diffusion Transformer (DiT)}{equation.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {II-C}}Architectural Comparison}{2}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {III}Experiments}{2}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-A}}Setup}{2}{subsection.3.1}\protected@file@percent }
+\citation{binkowski2018kid}
+\@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Architectural comparison of the two backbones.}}{3}{table.1}\protected@file@percent }
+\newlabel{tab:arch}{{I}{3}{Architectural comparison of the two backbones}{table.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces Main quantitative comparison. Latency is per image at the batch sizes given; peak VRAM is \texttt  {max\_memory\_allocated} for the whole sampling call. $\downarrow $ lower is better, $\uparrow $ higher is better.}}{3}{table.2}\protected@file@percent }
+\newlabel{tab:main}{{II}{3}{Main quantitative comparison. Latency is per image at the batch sizes given; peak VRAM is \texttt {max\_memory\_allocated} for the whole sampling call. $\downarrow $ lower is better, $\uparrow $ higher is better}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-B}}Quantitative Comparison}{3}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-C}}Hyper-parameter Analysis: Scale Depth versus NFE}{3}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:sweep}{{\mbox  {III-C}}{3}{Hyper-parameter Analysis: Scale Depth versus NFE}{subsection.3.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-D}}Component Analysis}{3}{subsection.3.4}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Compute sweeps. ``Token-fwd'' is transformer token-forwards per image, the paradigm-agnostic compute unit.}}{4}{table.3}\protected@file@percent }
+\newlabel{tab:sweep}{{III}{4}{Compute sweeps. ``Token-fwd'' is transformer token-forwards per image, the paradigm-agnostic compute unit}{table.3}{}}
+\newlabel{sec:offload}{{\mbox  {III-D}}{4}{Component Analysis}{subsection.3.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-E}}Qualitative Analysis}{4}{subsection.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {IV}Strengths, Limitations and Future Extensions}{4}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-A}}Strengths and Limitations}{4}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-B}}Future Extensions}{4}{subsection.4.2}\protected@file@percent }
+\citation{li2024mar}
+\bibcite{tian2024var}{1}
+\bibcite{peebles2023dit}{2}
+\bibcite{ho2020ddpm}{3}
+\bibcite{song2021ddim}{4}
+\bibcite{nichol2021iddpm}{5}
+\bibcite{dhariwal2021adm}{6}
+\bibcite{rombach2022ldm}{7}
+\bibcite{esser2021vqgan}{8}
+\bibcite{vandenoord2017vqvae}{9}
+\bibcite{ho2022cfg}{10}
+\bibcite{chang2022maskgit}{11}
+\bibcite{li2024mar}{12}
+\bibcite{heusel2017fid}{13}
+\bibcite{binkowski2018kid}{14}
+\bibcite{parmar2022cleanfid}{15}
+\bibcite{radford2021clip}{16}
+\@writefile{toc}{\contentsline {section}{\numberline {V}Conclusion}{5}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{References}{5}{section*.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Generation trajectories for the class \emph  {macaw}. \textbf  {Top:} VAR's next-scale progression, decoding $\hat  f_k$ after each of the ten scales; the image is committed coarse-to-fine, with global layout fixed within the first three scales ($1{\times }1$ to $3{\times }3$) and later scales adding only high-frequency residuals. \textbf  {Bottom:} DiT's denoising trajectory, visualised as the running $\hat  x_0$ estimate $\,$at eight of fifty steps; the layout remains fluid until roughly step $15$ and continues to be revised throughout, illustrating the self-correcting property absent from the AR branch.}}{6}{figure.1}\protected@file@percent }
+\newlabel{fig:prog}{{1}{6}{Generation trajectories for the class \emph {macaw}. \textbf {Top:} VAR's next-scale progression, decoding $\hat f_k$ after each of the ten scales; the image is committed coarse-to-fine, with global layout fixed within the first three scales ($1{\times }1$ to $3{\times }3$) and later scales adding only high-frequency residuals. \textbf {Bottom:} DiT's denoising trajectory, visualised as the running $\hat x_0$ estimate $\,$at eight of fifty steps; the layout remains fluid until roughly step $15$ and continues to be revised throughout, illustrating the self-correcting property absent from the AR branch}{figure.1}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Left: quality--latency Pareto front on the T4. Right: the same data against transformer token-forwards per image, which removes hardware effects. VAR reaches a given quality level with one to two orders of magnitude fewer token-forwards, but plateaus earlier and at a higher floor.}}{7}{figure.2}\protected@file@percent }
+\newlabel{fig:tradeoff}{{2}{7}{Left: quality--latency Pareto front on the T4. Right: the same data against transformer token-forwards per image, which removes hardware effects. VAR reaches a given quality level with one to two orders of magnitude fewer token-forwards, but plateaus earlier and at a higher floor}{figure.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Guidance sweep. Solid: FID (left axis). Dashed: CLIP-Score (right axis). Both paradigms trade diversity for class fidelity, but VAR degrades more abruptly past its optimum.}}{7}{figure.3}\protected@file@percent }
+\newlabel{fig:guidance}{{3}{7}{Guidance sweep. Solid: FID (left axis). Dashed: CLIP-Score (right axis). Both paradigms trade diversity for class fidelity, but VAR degrades more abruptly past its optimum}{figure.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Matched-seed samples. Top: VAR-d16 ($K{=}10$, $w{=}1.5$). Bottom: DiT-XL/2 (NFE${=}50$, $w{=}4.0$).}}{7}{figure.4}\protected@file@percent }
+\newlabel{fig:qual}{{4}{7}{Matched-seed samples. Top: VAR-d16 ($K{=}10$, $w{=}1.5$). Bottom: DiT-XL/2 (NFE${=}50$, $w{=}4.0$)}{figure.4}{}}
+\gdef \@abspage@last{7}
